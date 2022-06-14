@@ -1,0 +1,71 @@
+use std::{sync::Arc, time::Duration};
+
+use async_stream::try_stream;
+use axum::{
+    body::{Body, Bytes},
+    http::Response,
+    response::IntoResponse,
+    routing::get,
+    Extension, Router,
+};
+use tokio::{sync::broadcast, time::sleep};
+
+#[derive(Clone)]
+enum Msg {
+    Tick,
+    Tock,
+}
+
+#[tokio::main]
+async fn main() {
+    let (tx, _rx) = broadcast::channel::<Msg>(10);
+
+    tokio::spawn({
+        let tx = tx.clone();
+        async move {
+            loop {
+                tx.send(Msg::Tick).ok();
+                sleep(Duration::from_millis(150)).await;
+                tx.send(Msg::Tock).ok();
+                sleep(Duration::from_millis(850)).await;
+            }
+        }
+    });
+
+    let app = Router::new()
+        .route("/", get(serve_stream))
+        .layer(Extension(tx));
+    axum::Server::bind(&"[::]:8080".parse().unwrap())
+        .serve(app.into_make_service())
+        .await
+        .unwrap();
+}
+
+async fn serve_stream(Extension(tx): Extension<broadcast::Sender<Msg>>) -> impl IntoResponse {
+    let mut rx = tx.subscribe();
+
+    let s = try_stream! {
+        loop {
+            match rx.recv().await {
+                Ok(msg) => match msg {
+                    Msg::Tick => {
+                        yield Bytes::from_static(b"Tick\n")
+                    },
+                    Msg::Tock => {
+                        yield Bytes::from_static(b"Tock\n")
+                    },
+                },
+                Err(err) => {
+                    println!("body error: {err}");
+                    return;
+                }
+            }
+        }
+    };
+
+    let body = Body::wrap_stream::<_, _, std::io::Error>(s);
+    let mut res = Response::new(body);
+    res.headers_mut()
+        .insert("server", "super-sample-code".try_into().unwrap());
+    res
+}
