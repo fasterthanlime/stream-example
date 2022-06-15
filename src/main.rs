@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use async_stream::try_stream;
 use axum::{
     body::{Body, Bytes},
     http::Response,
@@ -8,7 +7,11 @@ use axum::{
     routing::get,
     Extension, Router,
 };
-use tokio::{sync::broadcast, time::sleep};
+use tokio::{
+    sync::{broadcast, mpsc},
+    time::sleep,
+};
+use tokio_stream::wrappers::ReceiverStream;
 
 #[derive(Clone)]
 enum Msg {
@@ -44,16 +47,14 @@ async fn main() {
 async fn serve_stream(Extension(tx): Extension<broadcast::Sender<Msg>>) -> impl IntoResponse {
     let mut rx = tx.subscribe();
 
-    let s = try_stream! {
+    let (s_tx, s_rx) = mpsc::channel(1);
+
+    tokio::spawn(async move {
         loop {
             match rx.recv().await {
                 Ok(msg) => match msg {
-                    Msg::Tick => {
-                        yield Bytes::from_static(b"Tick\n")
-                    },
-                    Msg::Tock => {
-                        yield Bytes::from_static(b"Tock\n")
-                    },
+                    Msg::Tick => s_tx.send(Ok(Bytes::from_static(b"Tick\n"))).await.unwrap(),
+                    Msg::Tock => s_tx.send(Ok(Bytes::from_static(b"Tock\n"))).await.unwrap(),
                 },
                 Err(err) => {
                     println!("body error: {err}");
@@ -61,9 +62,9 @@ async fn serve_stream(Extension(tx): Extension<broadcast::Sender<Msg>>) -> impl 
                 }
             }
         }
-    };
+    });
 
-    let body = Body::wrap_stream::<_, _, std::io::Error>(s);
+    let body = Body::wrap_stream::<_, _, std::io::Error>(ReceiverStream::new(s_rx));
     let mut res = Response::new(body);
     res.headers_mut()
         .insert("server", "super-sample-code".try_into().unwrap());
